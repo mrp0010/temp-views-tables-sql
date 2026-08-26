@@ -1,0 +1,156 @@
+create or replace view DEV_ADMS.DP_012_NETWORK_PERFORMANCE.TEMP_ETR_INTERIM_LOG(
+	INCIDENT_REF,
+	SR_NUMBER,
+	ETR_1,
+	ETR_2,
+	ETR_3,
+	ETR_1_DT,
+	ETR_2_DT,
+	ETR_3_DT,
+	CU_1,
+	CU_2,
+	CU_3,
+	CU_1_DT,
+	CU_2_DT,
+	CU_3_DT,
+	TOTAL_ETR_STEPS,
+	TOTAL_INTERIM_STEPS,
+	HAS_ETR,
+	HAS_INTERIM,
+	HAS_ETR_OR_INTERIM,
+	FIRST_ETR_VALUE,
+	ETR_RANGE_TO,
+	LAST_ETR_UPDATE_DATETIME,
+	LAST_INTERIM_UPDATE_DATETIME,
+	ETR_WITHIN_3H_COUNT,
+	INTERIM_WITHIN_3H_COUNT
+) COMMENT='The table contains records of network performance metrics, specifically interim and ETR (Estimated Time to Restore) logs. Each record represents a single incident and includes details about the incident, steps taken, and related metrics.'
+ as
+WITH COMBINED_AUDIT AS (
+    SELECT
+        RECORD_ID,
+        OPERATION_DT,
+        NEW_VAL,
+        FIELD_NAME,
+        ROW_NUMBER() OVER (
+            PARTITION BY RECORD_ID, FIELD_NAME
+            ORDER BY OPERATION_DT ASC
+        ) AS STEP,
+        ROW_NUMBER() OVER (
+            PARTITION BY RECORD_ID, FIELD_NAME
+            ORDER BY OPERATION_DT DESC
+        ) AS REV_STEP
+    FROM DEV_ADMS.ENRICHED_SIEBEL.ENRICHED_SIEBEL_CURRENT_CX_M_AUDIT_ITEM
+    WHERE FIELD_NAME IN (
+        'VEC ETR To Date Time',
+        'VEC ETR Customer Update'
+    )
+    AND NEW_VAL <> 'Unknown'
+),
+
+BASE AS (
+    SELECT
+        DOI."INCIDENT REF" AS INCIDENT_REF,
+        SR.SERVICE_REQUEST_NUMBER AS SR_NUMBER,
+        CA.FIELD_NAME,
+        CA.STEP,
+        CA.REV_STEP,
+        CA.NEW_VAL,
+        CA.OPERATION_DT,
+        DOI.INCIDENT_START_DATETIME,
+
+        CASE 
+            WHEN CA.FIELD_NAME = 'VEC ETR To Date Time'
+                 AND DATEDIFF('minute', DOI.INCIDENT_START_DATETIME, CA.OPERATION_DT) <= 180
+            THEN 1 ELSE 0 END AS ETR_WITHIN_180,
+
+        CASE 
+            WHEN CA.FIELD_NAME = 'VEC ETR Customer Update'
+                 AND DATEDIFF('minute', DOI.INCIDENT_START_DATETIME, CA.OPERATION_DT) <= 180
+            THEN 1 ELSE 0 END AS INTERIM_WITHIN_180
+
+    FROM EDW_TEST_CURATED.CUSTOMER.DIM_SERVICE_REQUEST SR
+    LEFT JOIN COMBINED_AUDIT CA
+        ON SR.SERVICE_REQUEST_ID = CA.RECORD_ID
+    LEFT JOIN DEV_ADMS.DP_012_NETWORK_PERFORMANCE.DIM_OUTAGE_INCIDENT DOI
+        ON SR.SERVICE_REQUEST_NUMBER = DOI.SIEBEL_SERVICE_REQUEST_NUMBER
+    WHERE DOI."INCIDENT REF" IS NOT NULL
+),
+
+PIVOTED AS (
+    SELECT
+        INCIDENT_REF,
+        SR_NUMBER,
+
+        /* =========================
+           ETR PIVOT
+           ========================= */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 1 THEN NEW_VAL END) AS ETR_1,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 2 THEN NEW_VAL END) AS ETR_2,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 3 THEN NEW_VAL END) AS ETR_3,
+
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 1 THEN OPERATION_DT END) AS ETR_1_DT,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 2 THEN OPERATION_DT END) AS ETR_2_DT,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 3 THEN OPERATION_DT END) AS ETR_3_DT,
+
+        /* =========================
+           CUSTOMER UPDATE PIVOT
+           ========================= */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 1 THEN NEW_VAL END) AS CU_1,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 2 THEN NEW_VAL END) AS CU_2,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 3 THEN NEW_VAL END) AS CU_3,
+
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 1 THEN OPERATION_DT END) AS CU_1_DT,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 2 THEN OPERATION_DT END) AS CU_2_DT,
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND STEP = 3 THEN OPERATION_DT END) AS CU_3_DT,
+
+        /* =========================
+           METRICS
+           ========================= */
+
+        COUNT(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' THEN 1 END) AS TOTAL_ETR_STEPS,
+        COUNT(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' THEN 1 END) AS TOTAL_INTERIM_STEPS,
+
+        /* Flags */
+        CASE 
+            WHEN COUNT(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' THEN 1 END) > 0 THEN 'Yes'
+            ELSE 'No'
+        END AS HAS_ETR,
+        CASE 
+            WHEN COUNT(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' THEN 1 END) > 0 THEN 'Yes'
+            ELSE 'No'
+        END AS HAS_INTERIM,
+        CASE 
+            WHEN 
+                COUNT(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' THEN 1 END) > 0
+                OR
+                COUNT(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' THEN 1 END) > 0
+            THEN 'Yes'
+            ELSE 'No'
+        END AS HAS_ETR_OR_INTERIM,
+
+        /* first ETR */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND STEP = 1 THEN NEW_VAL END) AS FIRST_ETR_VALUE,
+
+        /* last ETR VALUE */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND REV_STEP = 1 THEN NEW_VAL END) AS ETR_RANGE_TO,
+
+        /* last ETR datetime */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' AND REV_STEP = 1 THEN OPERATION_DT END) AS LAST_ETR_UPDATE_DATETIME,
+
+        /* last interim datetime */
+        MAX(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' AND REV_STEP = 1 THEN OPERATION_DT END) AS LAST_INTERIM_UPDATE_DATETIME,
+
+        /* within 3 hours counts */
+        SUM(CASE WHEN FIELD_NAME = 'VEC ETR To Date Time' THEN ETR_WITHIN_180 ELSE 0 END) AS ETR_WITHIN_3H_COUNT,
+        SUM(CASE WHEN FIELD_NAME = 'VEC ETR Customer Update' THEN INTERIM_WITHIN_180 ELSE 0 END) AS INTERIM_WITHIN_3H_COUNT
+
+    FROM BASE
+    GROUP BY
+        INCIDENT_REF,
+        SR_NUMBER
+)
+
+SELECT *
+FROM PIVOTED
+ORDER BY INCIDENT_REF;
