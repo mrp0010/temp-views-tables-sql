@@ -1,0 +1,63 @@
+create or replace view DEV_ADMS.DP_012_NETWORK_PERFORMANCE.TEMP_SR_MAPPING(
+	INCIDENT_REF,
+	INCIDENT_SR,
+	SR_REFERENCE,
+	SR_TYPE
+) as
+WITH EVENT_BASE AS (
+    SELECT
+        E."INCIDENT REF"                AS event_id,
+        E.SIEBEL_SERVICE_REQUEST_NUMBER AS event_sr,
+        E.DIM_OUTAGE_INCIDENT_KEY       AS incident_key
+    FROM DEV_ADMS.DP_012_NETWORK_PERFORMANCE.DIM_OUTAGE_INCIDENT E
+    WHERE
+        E.INCIDENT_TYPE = 'Unplanned'
+        AND E.INCIDENT_CANCELLED_FLAG = 'No'
+        AND E.RESPONSIBILITY_PARTY_NAME = 'Vector'
+),
+
+SR_ENRICH AS (
+    SELECT
+        SR.SERVICE_REQUEST_ID,
+        SR.SERVICE_REQUEST_NUMBER,
+        SR.PARENT_LEVEL_1_ID,
+        SR.PARENT_LEVEL_COUNT
+    FROM EDW_TEST_CURATED.CUSTOMER.DIM_SERVICE_REQUEST SR
+),
+
+SR_CLASSIFICATION AS (
+    SELECT
+        EB.event_id,
+        EB.event_sr,
+
+        SR.SERVICE_REQUEST_NUMBER AS siebel_sr,
+        SR.PARENT_LEVEL_1_ID      AS parent_sr_id,
+
+        CASE
+            WHEN SR.PARENT_LEVEL_COUNT = 0 THEN 'Parent SR'
+            WHEN SR.PARENT_LEVEL_COUNT > 0 THEN 'Child SR'
+            ELSE 'Invalid SR'
+        END AS sr_type,
+
+        CASE
+            WHEN SR.PARENT_LEVEL_COUNT = 0
+                THEN SR.SERVICE_REQUEST_NUMBER
+            WHEN SR.PARENT_LEVEL_COUNT > 0
+                THEN P.SERVICE_REQUEST_NUMBER
+            ELSE NULL
+        END AS sr_reference
+
+    FROM EVENT_BASE EB
+    LEFT JOIN SR_ENRICH SR
+        ON SR.SERVICE_REQUEST_NUMBER = EB.event_sr
+
+    LEFT JOIN SR_ENRICH P
+        ON SR.PARENT_LEVEL_1_ID = P.SERVICE_REQUEST_ID
+)
+
+SELECT DISTINCT
+    event_id AS INCIDENT_REF,
+    event_sr AS INCIDENT_SR,
+    sr_reference,
+    sr_type
+FROM SR_CLASSIFICATION;
